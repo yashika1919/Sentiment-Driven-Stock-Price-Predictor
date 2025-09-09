@@ -1,0 +1,13 @@
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+yfinance
+textblob
+vaderSentiment
+requests
+beautifulsoup4
+xgboost
+plotly
+jupyter
