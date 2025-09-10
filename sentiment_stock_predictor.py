@@ -31,62 +31,59 @@ class FinancialNewsScraper:
     def __init__(self):
         self.vader = SentimentIntensityAnalyzer()
         
-    def generate_synthetic_news(self, ticker, num_articles=10000):
+    def scrape_finviz_news(self, ticker):
         """
-        Generate synthetic financial news data for demonstration
-        In production, this would scrape real news sources
+        Scrapes financial news headlines for a given ticker from Finviz.
         """
-        print(f"Generating {num_articles} synthetic news articles...")
+        print(f"Scraping real-time news for {ticker}...")
+        url = f"https://finviz.com/quote.ashx?t={ticker}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
         
-        # News templates for realistic synthetic data
-        templates = [
-            "{company} reports strong quarterly earnings, beating analyst expectations by {percent}%",
-            "Analysts upgrade {company} stock following positive market trends",
-            "{company} faces regulatory challenges, stock under pressure",
-            "Market volatility affects {company} shares amid economic uncertainty",
-            "{company} announces new product launch, investors react positively",
-            "Technical analysis suggests {company} stock may break resistance levels",
-            "{company} CEO announces strategic partnership, boosting investor confidence",
-            "Concerns over supply chain issues impact {company} outlook",
-            "{company} stock rallies on better than expected revenue growth",
-            "Institutional investors increase positions in {company}",
-            "{company} warns of headwinds in upcoming quarter",
-            "Breaking: {company} exceeds growth targets for fiscal year",
-            "{company} shares decline amid sector-wide selloff",
-            "Positive analyst coverage drives {company} stock higher",
-            "{company} investment in AI technology shows promising returns"
-        ]
-        
-        sentiments = ['positive', 'negative', 'neutral']
-        sentiment_weights = [0.45, 0.25, 0.30]  # Slightly positive bias in financial news
-        
-        articles = []
-        base_date = datetime.now() - timedelta(days=365)
-        
-        for i in range(num_articles):
-            date = base_date + timedelta(days=np.random.randint(0, 365))
-            template = np.random.choice(templates)
-            sentiment_type = np.random.choice(sentiments, p=sentiment_weights)
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status() # Raise an exception for bad status codes
+            soup = BeautifulSoup(response.content, 'html.parser')
+            news_table = soup.find(id='news-table')
             
-            # Generate article based on sentiment
-            if sentiment_type == 'positive':
-                percent = np.random.uniform(2, 15)
-                headline = template.format(company=ticker, percent=round(percent, 1))
-            elif sentiment_type == 'negative':
-                percent = np.random.uniform(-15, -2)
-                headline = template.format(company=ticker, percent=round(percent, 1))
-            else:
-                headline = template.format(company=ticker, percent=0)
+            articles = []
+            for row in news_table.findAll('tr'):
+                if row.a:
+                    headline = row.a.get_text()
+                    source = row.span.get_text()
+                    
+                    # Process date and time
+                    datetime_str = row.td.text.strip()
+                    if ' ' in datetime_str:
+                        date_str, time_str = datetime_str.split(' ')
+                        if date_str.lower() == 'today':
+                            date = datetime.now().date()
+                        else:
+                            date = pd.to_datetime(date_str).date()
+                        time = pd.to_datetime(time_str).time()
+                    else:
+                        # If only time is present, use the date from the previous entry
+                        date = articles[-1]['date'].date() if articles else datetime.now().date()
+                        time = pd.to_datetime(datetime_str).time()
+
+                    full_datetime = datetime.combine(date, time)
+                    
+                    articles.append({
+                        'date': full_datetime,
+                        'headline': headline,
+                        'source': source.strip(),
+                        'ticker': ticker
+                    })
             
-            articles.append({
-                'date': date,
-                'headline': headline,
-                'source': np.random.choice(['Reuters', 'Bloomberg', 'CNBC', 'WSJ', 'Financial Times']),
-                'ticker': ticker
-            })
+            if not articles:
+                print(f"Warning: No news found for {ticker}. Check the ticker symbol.")
+                return pd.DataFrame()
+
+            return pd.DataFrame(articles)
         
-        return pd.DataFrame(articles)
-    
+        except requests.exceptions.RequestException as e:
+            print(f"Error scraping news for {ticker}: {e}")
+            return pd.DataFrame() # Return empty DataFrame on error
+            
     def analyze_sentiment(self, text):
         """Analyze sentiment using both VADER and TextBlob"""
         # VADER sentiment
@@ -183,8 +180,13 @@ class SentimentStockPredictor:
         stock_df = self.stock_processor.fetch_stock_data()
         stock_df = self.stock_processor.calculate_technical_indicators(stock_df)
         
-        # Generate and process news data
-        news_df = self.news_scraper.generate_synthetic_news(self.ticker, 10000)
+        # Scrape and process real news data
+        news_df = self.news_scraper.scrape_finviz_news(self.ticker)
+        if news_df.empty:
+            print("No news data to process. Proceeding with stock data only.")
+            # Handle case with no news
+            stock_df.dropna(inplace=True)
+            return stock_df, pd.DataFrame() # Return empty news_df
         
         # Calculate sentiment for each article
         print("Analyzing sentiment for news articles...")
@@ -212,8 +214,7 @@ class SentimentStockPredictor:
         stock_df['date'] = pd.to_datetime(stock_df['Date']).dt.date
         
         # Convert daily_sentiment date to datetime for merging
-        daily_sentiment['date'] = pd.to_datetime(daily_sentiment['date'])
-        stock_df['date'] = pd.to_datetime(stock_df['date'])
+        daily_sentiment['date'] = pd.to_datetime(daily_sentiment['date']).dt.date
         
         merged_df = pd.merge(stock_df, daily_sentiment, on='date', how='left')
         
@@ -292,6 +293,10 @@ class SentimentStockPredictor:
         # Split features into with and without sentiment
         sentiment_features = [i for i, name in enumerate(feature_names) if 'sentiment' in name]
         non_sentiment_features = [i for i, name in enumerate(feature_names) if 'sentiment' not in name]
+
+        if not sentiment_features:
+            print("No sentiment features found. Skipping improvement calculation.")
+            return 0, 0, 0
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
@@ -318,8 +323,11 @@ class SentimentStockPredictor:
         mae_with_sent = mean_absolute_error(y_test, y_pred_with_sent)
         
         # Calculate improvement
-        improvement = ((mae_no_sent - mae_with_sent) / mae_no_sent) * 100
-        
+        if mae_no_sent == 0:
+            improvement = 0
+        else:
+            improvement = ((mae_no_sent - mae_with_sent) / mae_no_sent) * 100
+
         print(f"\nMAE without sentiment: {mae_no_sent:.4f}")
         print(f"MAE with sentiment: {mae_with_sent:.4f}")
         print(f"Improvement: {improvement:.2f}% reduction in MAE")
@@ -333,13 +341,16 @@ class SentimentStockPredictor:
         print("="*60)
         
         print(f"\nStock Ticker: {self.ticker}")
-        print(f"Total News Articles Processed: {len(news_df):,}")
-        print(f"Date Range: {news_df['date'].min().strftime('%Y-%m-%d')} to {news_df['date'].max().strftime('%Y-%m-%d')}")
         
-        print("\n--- Sentiment Analysis Summary ---")
-        sentiment_summary = news_df[['compound', 'positive', 'negative', 'neutral']].describe()
-        print(sentiment_summary)
-        
+        if not news_df.empty:
+            print(f"Total News Articles Processed: {len(news_df):,}")
+            print(f"Date Range: {news_df['date'].min().strftime('%Y-%m-%d')} to {news_df['date'].max().strftime('%Y-%m-%d')}")
+            print("\n--- Sentiment Analysis Summary ---")
+            sentiment_summary = news_df[['compound', 'positive', 'negative', 'neutral']].describe()
+            print(sentiment_summary)
+        else:
+            print("No news articles were processed.")
+
         print("\n--- Model Performance Metrics ---")
         for model_name, metrics in self.performance_metrics.items():
             print(f"\n{model_name}:")
@@ -347,9 +358,13 @@ class SentimentStockPredictor:
                 print(f"  {metric_name}: {value:.4f}")
         
         print("\n--- Key Achievements ---")
-        print(f"✓ Processed {len(news_df):,}+ financial news articles")
-        print(f"✓ Integrated sentiment analysis with historical stock data")
-        print(f"✓ Achieved {improvement:.1f}% reduction in MAE through sentiment integration")
+        if not news_df.empty:
+            print(f"✓ Processed {len(news_df):,}+ financial news articles")
+            print(f"✓ Integrated sentiment analysis with historical stock data")
+            print(f"✓ Achieved {improvement:.1f}% reduction in MAE through sentiment integration")
+        else:
+            print("✓ Ran prediction based on historical stock data.")
+            
         print(f"✓ Reduced manual financial data analysis by {time_saved}%")
         
         # Find best performing model
@@ -363,7 +378,7 @@ class SentimentStockPredictor:
         print("\n" + "="*60)
         
         return {
-            'articles_processed': len(news_df),
+            'articles_processed': len(news_df) if not news_df.empty else 0,
             'mae_improvement': improvement,
             'time_saved': time_saved,
             'best_model': best_model[0],
@@ -381,6 +396,10 @@ def main(ticker="AAPL"):
     # Prepare data
     merged_df, news_df = predictor.prepare_data()
     
+    if merged_df.empty:
+        print(f"Could not retrieve data for {ticker}. Aborting.")
+        return None, None, None, None, None
+        
     # Create features
     X, y, feature_names = predictor.create_features(merged_df)
     
@@ -403,7 +422,8 @@ def main(ticker="AAPL"):
     
     # Save processed data
     merged_df.to_csv('processed_stock_sentiment_data.csv', index=False)
-    news_df.to_csv('financial_news_sentiment.csv', index=False)
+    if not news_df.empty:
+        news_df.to_csv('financial_news_sentiment.csv', index=False)
     
     # Save performance metrics
     metrics_df = pd.DataFrame(predictor.performance_metrics).T
@@ -418,7 +438,8 @@ def main(ticker="AAPL"):
         f.write(f"Time Saved: {report['time_saved']}%\n")
         f.write(f"Best Model: {report['best_model']}\n")
         f.write(f"Best MAE: {report['best_mae']:.4f}\n")
-     # Predict the next day's price using the best model
+
+    # Predict the next day's price using the best model
     best_model_name = report['best_model']
     best_model = predictor.models[best_model_name]
     last_features = X[-1].reshape(1, -1)
@@ -426,15 +447,15 @@ def main(ticker="AAPL"):
     predicted_next_price = best_model.predict(last_features_scaled)[0]
     print(f"\nPredicted next day's closing price for {ticker}: {predicted_next_price:.2f}")
 
-    
     print("\n✅ Project completed successfully!")
     print("📁 Generated files:")
     print("  - processed_stock_sentiment_data.csv")
-    print("  - financial_news_sentiment.csv")
+    if not news_df.empty:
+        print("  - financial_news_sentiment.csv")
     print("  - model_performance_metrics.csv")
     print("  - project_report.txt")
     
     return predictor, merged_df, news_df, report, predicted_next_price
 
 if __name__ == "__main__":
-    predictor, data, news, report = main()
+    main()
